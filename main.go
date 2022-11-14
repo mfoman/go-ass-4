@@ -51,7 +51,6 @@ func (p *peer) Request(ctx context.Context, req *api.Request) (*api.RequestBack,
 	if p.state == HELD || (p.state == WANTED && (p.clock < req.Clock || (p.clock == req.Clock && p.id > req.Id))) {
 		log.Println("Request deferred since my state is held, or wanted and i have higher priority")
 		p.defered = append(p.defered, req.Id)
-
 	} else {
 		log.Println("Request is replied right away")
 		p.clients[req.Id].Reply(ctx, &api.Reply{})
@@ -87,18 +86,24 @@ func (p *peer) criticalSection() {
 		When done I call sendReplyToAllDefered
 	*/
 
+	log.Println("CS: Init")
 	p.state = HELD
 	time.Sleep(5 * time.Second)
 	p.state = RELEASED
+	log.Println("CS: Done")
 
 	p.sendReplyToAllDefered()
 }
 
 func (p *peer) sendRequestToAll() {
+	p.state = WANTED
+
 	request := &api.Request{
 		Id:    p.id,
 		Clock: p.clock,
 	}
+
+	p.requestsSent = len(p.clients)
 
 	for id, client := range p.clients {
 		_, err := client.Request(p.ctx, request)
@@ -107,9 +112,7 @@ func (p *peer) sendRequestToAll() {
 			fmt.Println("something went wrong")
 		}
 
-		p.requestsSent++
-
-		fmt.Printf("Got USELESS reply from id %v\n", id)
+		fmt.Printf("Got USELESS requestBack from id %v\n", id)
 	}
 }
 
@@ -130,7 +133,7 @@ func (p *peer) sendReplyToAllDefered() {
 		}
 	}
 
-	p.defered = make([]uint32, len(p.clients))
+	p.defered = make([]uint32, 0)
 }
 
 func main() {
@@ -141,15 +144,6 @@ func main() {
 
 	var port = uint32(*port)
 
-	p := &peer{
-		id:           port,
-		clients:      make(map[uint32]api.DistributedMutualExclusionClient),
-		defered:      make([]uint32, 0),
-		ctx:          ctx,
-		state:        RELEASED,
-		clock:        0,
-		requestsSent: 0,
-	}
 
 	// Create listener tcp on port ownPort
 	var attempts = 0
@@ -174,7 +168,17 @@ func main() {
 		break
 	}
 
-	log.Printf("Opened on port: %d\n", port)
+	p := &peer{
+		id:           port,
+		clients:      make(map[uint32]api.DistributedMutualExclusionClient),
+		defered:      make([]uint32, 0),
+		ctx:          ctx,
+		state:        RELEASED,
+		clock:        0,
+		requestsSent: 0,
+	}
+
+	log.Printf("Opened on port: %d\n", p.id)
 
 	grpcServer := grpc.NewServer()
 	api.RegisterDistributedMutualExclusionServer(grpcServer, p)
@@ -188,7 +192,7 @@ func main() {
 	for i := 0; i < 3; i++ {
 		peerPort := uint32(5000 + i)
 
-		if port == p.id {
+		if peerPort == p.id {
 			continue
 		}
 
@@ -201,9 +205,12 @@ func main() {
 		}
 
 		defer conn.Close()
+		fmt.Printf("Succes connecting to: %v\n", peerPort)
 		c := api.NewDistributedMutualExclusionClient(conn)
 		p.clients[peerPort] = c
 	}
+
+	log.Printf("I know %d clients", len(p.clients))
 
 	scanner := bufio.NewScanner(os.Stdin)
 
