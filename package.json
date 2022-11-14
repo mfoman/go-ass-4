@@ -1,0 +1,28 @@
+{
+  "name": "go-ass-4",
+  "version": "1.0.0",
+  "description": "A simple template for a project with a peer-to-peer architecture. In the system, each node is able to send a ping to all other nodes in the system, and in return get a response from each node, telling how many times it has pinged that specific node. As each node always sends a ping to all nodes at the same time, the response will always be the same from all nodes.",
+  "main": "index.js",
+  "scripts": {
+    "run:proto": "nodemon -e proto --exec npm run compile --signal SIGTERM",
+    "run:go": "nodemon -e go --exec go run . --signal SIGTERM",
+    "compile": "protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative grpc/interface.proto",
+    "start": "npm-run-all -p run:proto run:go",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mfoman/go-ass-4.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/mfoman/go-ass-4/issues"
+  },
+  "homepage": "https://github.com/mfoman/go-ass-4#readme",
+  "devDependencies": {
+    "nodemon": "^2.0.20",
+    "npm-run-all": "^4.1.5"
+  }
+}

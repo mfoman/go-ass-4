@@ -1,4 +1,4 @@
-module github.com/NaddiNadja/peer-to-peer
+module github.com/mfoman/go-ass-4
 
 go 1.17
 
