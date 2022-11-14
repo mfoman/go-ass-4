@@ -46,13 +46,17 @@ func (p *peer) Request(ctx context.Context, req *api.Request) (*api.RequestBack,
 			I send them a REPLY right away
 	*/
 
-	log.Printf("Received request from %d\n", req.Id)
+	log.Printf("Got request from %v with clock %v\n", req.Id, req.Clock)
 
 	if p.state == HELD || (p.state == WANTED && (p.clock < req.Clock || (p.clock == req.Clock && p.id > req.Id))) {
-		log.Println("Request deferred since my state is held, or wanted and i have higher priority")
+		log.Printf("Deferring request from %v with clock %v\n", req.Id, req.Clock)
 		p.defered = append(p.defered, req.Id)
 	} else {
-		log.Println("Request is replied right away")
+		if p.state == WANTED {
+			p.requestsSent++
+			p.clients[req.Id].Request(ctx, &api.Request{Id: p.id, Clock: p.clock})
+		}
+		log.Printf("Sending reply right away to %v with clock %v\n", req.Id, req.Clock)
 		p.clients[req.Id].Reply(ctx, &api.Reply{})
 	}
 
@@ -73,8 +77,11 @@ func (p *peer) Reply(ctx context.Context, req *api.Reply) (*api.ReplyBack, error
 	p.requestsSent--
 
 	if p.requestsSent == 0 {
+		log.Println("Got a reply. All requests replied.")
 		go p.criticalSection()
 	}
+
+	log.Printf("Got a reply. Missing %d replies.\n", p.requestsSent)
 
 	rep := &api.ReplyBack{}
 	return rep, nil
@@ -86,11 +93,11 @@ func (p *peer) criticalSection() {
 		When done I call sendReplyToAllDefered
 	*/
 
-	log.Println("CS: Init")
+	log.Println("Critical Section: Started working")
 	p.state = HELD
 	time.Sleep(5 * time.Second)
 	p.state = RELEASED
-	log.Println("CS: Done")
+	log.Println("Critical Section: Done working")
 
 	p.sendReplyToAllDefered()
 }
@@ -105,14 +112,14 @@ func (p *peer) sendRequestToAll() {
 
 	p.requestsSent = len(p.clients)
 
+	log.Printf("Sending request to all peers. Missing %d replies.\n", p.requestsSent)
+
 	for id, client := range p.clients {
 		_, err := client.Request(p.ctx, request)
 
 		if err != nil {
-			fmt.Println("something went wrong")
+			log.Printf("Something went wrong with %v\n", id)
 		}
-
-		fmt.Printf("Got USELESS requestBack from id %v\n", id)
 	}
 }
 
@@ -129,7 +136,7 @@ func (p *peer) sendReplyToAllDefered() {
 		_, err := p.clients[id].Reply(p.ctx, reply)
 
 		if err != nil {
-			fmt.Println("something went wrong")
+			log.Printf("Something went wrong with %v\n", id)
 		}
 	}
 
@@ -143,7 +150,6 @@ func main() {
 	defer cancel()
 
 	var port = uint32(*port)
-
 
 	// Create listener tcp on port ownPort
 	var attempts = 0
@@ -197,7 +203,7 @@ func main() {
 		}
 
 		var conn *grpc.ClientConn
-		fmt.Printf("Trying to dial: %v\n", peerPort)
+		log.Printf("Trying to dial: %v\n", peerPort)
 		conn, err := grpc.Dial(fmt.Sprintf(":%v", peerPort), grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
 
 		if err != nil {
@@ -205,17 +211,17 @@ func main() {
 		}
 
 		defer conn.Close()
-		fmt.Printf("Succes connecting to: %v\n", peerPort)
+		log.Printf("Succes connecting to: %v\n", peerPort)
 		c := api.NewDistributedMutualExclusionClient(conn)
 		p.clients[peerPort] = c
 	}
 
-	log.Printf("I know %d clients", len(p.clients))
+	log.Printf("I am connected to %d clients", len(p.clients))
 
 	scanner := bufio.NewScanner(os.Stdin)
 
 	for scanner.Scan() {
-		log.Println("Requesting critical section...")
+		log.Println("Requesting to work in critical section...")
 		p.sendRequestToAll()
 	}
 }
