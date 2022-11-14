@@ -8,13 +8,130 @@ import (
 	"log"
 	"net"
 	"os"
+	"time"
 
-	ping "github.com/mfoman/go-ass-4/grpc"
+	api "github.com/mfoman/go-ass-4/grpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
+type STATE int64
+
+const (
+	RELEASED STATE = iota
+	HELD
+	WANTED
+)
+
 var port = flag.Int("port", 5000, "port")
+
+type peer struct {
+	api.UnimplementedDistributedMutualExclusionServer
+	id           uint32
+	clients      map[uint32]api.DistributedMutualExclusionClient
+	defered      []uint32
+	ctx          context.Context
+	state        STATE
+	clock        uint32
+	requestsSent int
+}
+
+func (p *peer) Request(ctx context.Context, req *api.Request) (*api.RequestBack, error) {
+	/*
+		I received a request from a peer
+
+		if my state is HELD or (WANTED and I have higher priority than my peer)
+			then i defer with a REPLY until later(queue)
+		else
+			I send them a REPLY right away
+	*/
+
+	log.Printf("Received request from %d\n", req.Id)
+
+	if p.state == HELD || (p.state == WANTED && (p.clock < req.Clock || (p.clock == req.Clock && p.id > req.Id))) {
+		log.Println("Request deferred since my state is held, or wanted and i have higher priority")
+		p.defered = append(p.defered, req.Id)
+
+	} else {
+		log.Println("Request is replied right away")
+		p.clients[req.Id].Reply(ctx, &api.Reply{})
+	}
+
+	rep := &api.RequestBack{}
+	return rep, nil
+}
+
+func (p *peer) Reply(ctx context.Context, req *api.Reply) (*api.ReplyBack, error) {
+	/*
+		I received REPLY from other peer
+
+		if i received N-1 REPLIES(1 for each Request send) then
+			i take CS(Critical Sec)
+		else
+			i wait for next reply
+	*/
+
+	p.requestsSent--
+
+	if p.requestsSent == 0 {
+		go p.criticalSection()
+	}
+
+	rep := &api.ReplyBack{}
+	return rep, nil
+}
+
+func (p *peer) criticalSection() {
+	/*
+		I have critical section
+		When done I call sendReplyToAllDefered
+	*/
+
+	p.state = HELD
+	time.Sleep(5 * time.Second)
+	p.state = RELEASED
+
+	p.sendReplyToAllDefered()
+}
+
+func (p *peer) sendRequestToAll() {
+	request := &api.Request{
+		Id:    p.id,
+		Clock: p.clock,
+	}
+
+	for id, client := range p.clients {
+		_, err := client.Request(p.ctx, request)
+
+		if err != nil {
+			fmt.Println("something went wrong")
+		}
+
+		p.requestsSent++
+
+		fmt.Printf("Got USELESS reply from id %v\n", id)
+	}
+}
+
+func (p *peer) sendReplyToAllDefered() {
+	reply := &api.Reply{}
+
+	/*
+		Reply all defered
+
+		then clear p.defered
+	*/
+
+	for _, id := range p.defered {
+		_, err := p.clients[id].Reply(p.ctx, reply)
+
+		if err != nil {
+			fmt.Println("something went wrong")
+		}
+	}
+
+	p.defered = make([]uint32, len(p.clients))
+}
 
 func main() {
 	flag.Parse()
@@ -25,10 +142,13 @@ func main() {
 	var port = uint32(*port)
 
 	p := &peer{
-		id:            port,
-		amountOfPings: make(map[uint32]uint32),
-		clients:       make(map[uint32]ping.PingClient),
-		ctx:           ctx,
+		id:           port,
+		clients:      make(map[uint32]api.DistributedMutualExclusionClient),
+		defered:      make([]uint32, 0),
+		ctx:          ctx,
+		state:        RELEASED,
+		clock:        0,
+		requestsSent: 0,
 	}
 
 	// Create listener tcp on port ownPort
@@ -57,7 +177,7 @@ func main() {
 	log.Printf("Opened on port: %d\n", port)
 
 	grpcServer := grpc.NewServer()
-	ping.RegisterPingServer(grpcServer, p)
+	api.RegisterDistributedMutualExclusionServer(grpcServer, p)
 
 	go func() {
 		if err := grpcServer.Serve(list); err != nil {
@@ -68,7 +188,7 @@ func main() {
 	for i := 0; i < 3; i++ {
 		peerPort := uint32(5000 + i)
 
-		if peerPort == port {
+		if port == p.id {
 			continue
 		}
 
@@ -81,44 +201,14 @@ func main() {
 		}
 
 		defer conn.Close()
-		c := ping.NewPingClient(conn)
+		c := api.NewDistributedMutualExclusionClient(conn)
 		p.clients[peerPort] = c
 	}
 
 	scanner := bufio.NewScanner(os.Stdin)
 
 	for scanner.Scan() {
-		log.Println("ping all")
-		p.sendPingToAll()
-	}
-}
-
-type peer struct {
-	ping.UnimplementedPingServer
-	id            uint32
-	amountOfPings map[uint32]uint32
-	clients       map[uint32]ping.PingClient
-	ctx           context.Context
-}
-
-func (p *peer) Ping(ctx context.Context, req *ping.Request) (*ping.Reply, error) {
-	id := req.Id
-	p.amountOfPings[id] += 1
-
-	rep := &ping.Reply{Amount: p.amountOfPings[id]}
-	return rep, nil
-}
-
-func (p *peer) sendPingToAll() {
-	request := &ping.Request{Id: p.id}
-
-	for id, client := range p.clients {
-		reply, err := client.Ping(p.ctx, request)
-
-		if err != nil {
-			fmt.Println("something went wrong")
-		}
-
-		fmt.Printf("Got reply from id %v: %v\n", id, reply.Amount)
+		log.Println("Requesting critical section...")
+		p.sendRequestToAll()
 	}
 }
