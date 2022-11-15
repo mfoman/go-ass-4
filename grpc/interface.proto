@@ -17,4 +17,7 @@ message Request {
     uint32 clock = 2;
 }
 
-message Reply {}
+message Reply {
+    uint32 id = 1;
+    uint32 clock = 2;
+}
