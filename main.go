@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	api "github.com/mfoman/go-ass-4/grpc"
@@ -34,6 +35,20 @@ type peer struct {
 	state        STATE
 	clock        uint32
 	requestsSent int
+	mu           sync.Mutex
+}
+
+func (p *peer) incrementClock() {
+	p.mu.Lock()
+	p.clock++
+	p.mu.Unlock()
+}
+
+func LamportMax(a, b uint32) uint32 {
+	if a > b {
+		return a + 1
+	}
+	return b + 1
 }
 
 func (p *peer) Request(ctx context.Context, req *api.Request) (*api.RequestBack, error) {
@@ -46,18 +61,27 @@ func (p *peer) Request(ctx context.Context, req *api.Request) (*api.RequestBack,
 			I send them a REPLY right away
 	*/
 
-	log.Printf("Got request from %v with clock %v\n", req.Id, req.Clock)
-
+	log.Printf("(L: %d) RECV: Received request from %d\n", p.clock, req.Id)
 	if p.state == HELD || (p.state == WANTED && (p.clock < req.Clock || (p.clock == req.Clock && p.id > req.Id))) {
-		log.Printf("Deferring request from %v with clock %v\n", req.Id, req.Clock)
+		log.Printf("(L: %d) Deferring request from %v\n", p.clock, req.Id)
 		p.defered = append(p.defered, req.Id)
+
+		p.mu.Lock()
+		p.clock = LamportMax(p.clock, req.Clock)
+		p.mu.Unlock()
 	} else {
 		if p.state == WANTED {
 			p.requestsSent++
+			p.incrementClock()
+			log.Printf("(L: %d) SEND: Rerequesting critical section to higher priority peer\n", p.clock)
 			p.clients[req.Id].Request(ctx, &api.Request{Id: p.id, Clock: p.clock})
 		}
-		log.Printf("Sending reply right away to %v with clock %v\n", req.Id, req.Clock)
-		p.clients[req.Id].Reply(ctx, &api.Reply{})
+		p.incrementClock()
+		log.Printf("(L: %d) SEND: Sending reply right away to %v\n", p.clock, req.Id)
+		p.clients[req.Id].Reply(ctx, &api.Reply{
+			Clock: p.clock,
+			Id:    p.id,
+		})
 	}
 
 	rep := &api.RequestBack{}
@@ -74,14 +98,17 @@ func (p *peer) Reply(ctx context.Context, req *api.Reply) (*api.ReplyBack, error
 			i wait for next reply
 	*/
 
+	p.mu.Lock()
+	p.clock = LamportMax(p.clock, req.Clock)
+	p.mu.Unlock()
+
 	p.requestsSent--
+	log.Printf("(L: %d) RECV: Got a reply. Missing %d replies.\n", p.clock, p.requestsSent)
 
 	if p.requestsSent == 0 {
-		log.Println("Got a reply. All requests replied.")
+		log.Printf("(L: %d) RECV: All requests replied.\n", p.clock)
 		go p.criticalSection()
 	}
-
-	log.Printf("Got a reply. Missing %d replies.\n", p.requestsSent)
 
 	rep := &api.ReplyBack{}
 	return rep, nil
@@ -93,17 +120,21 @@ func (p *peer) criticalSection() {
 		When done I call sendReplyToAllDefered
 	*/
 
-	log.Println("Critical Section: Started working")
+	p.incrementClock()
+	log.Printf("(L: %d) CS: Started working\n", p.clock)
 	p.state = HELD
 	time.Sleep(5 * time.Second)
 	p.state = RELEASED
-	log.Println("Critical Section: Done working")
+	p.incrementClock()
+	log.Printf("(L: %d) CS: Done working\n", p.clock)
 
 	p.sendReplyToAllDefered()
 }
 
 func (p *peer) sendRequestToAll() {
 	p.state = WANTED
+
+	p.incrementClock()
 
 	request := &api.Request{
 		Id:    p.id,
@@ -112,7 +143,7 @@ func (p *peer) sendRequestToAll() {
 
 	p.requestsSent = len(p.clients)
 
-	log.Printf("Sending request to all peers. Missing %d replies.\n", p.requestsSent)
+	log.Printf("(L: %d) SEND: Sending request to all peers. Missing %d replies.\n", p.clock, p.requestsSent)
 
 	for id, client := range p.clients {
 		_, err := client.Request(p.ctx, request)
@@ -124,7 +155,19 @@ func (p *peer) sendRequestToAll() {
 }
 
 func (p *peer) sendReplyToAllDefered() {
-	reply := &api.Reply{}
+
+	p.incrementClock()
+
+	if len(p.defered) != 0 {
+		log.Printf("(L: %d) SEND: Sending reply to all deferred peers.\n", p.clock)
+	} else {
+		log.Printf("(L: %d) SEND: No deferred peers.\n", p.clock)
+	}
+
+	reply := &api.Reply{
+		Clock: p.clock,
+		Id:    p.id,
+	}
 
 	/*
 		Reply all defered
@@ -221,7 +264,11 @@ func main() {
 	scanner := bufio.NewScanner(os.Stdin)
 
 	for scanner.Scan() {
-		log.Println("Requesting to work in critical section...")
-		p.sendRequestToAll()
+		if p.state == RELEASED {
+			log.Println("Requesting to work in critical section...")
+			p.sendRequestToAll()
+		} else {
+			log.Println("Already working in critical section...")
+		}
 	}
 }
